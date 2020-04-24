@@ -7,6 +7,12 @@
 //! - TX = PA12 | PB9
 //! - RX = PA11 | PB8
 //! - Interrupt = CAN1
+//! 
+//! # CAN2
+//! 
+//! - TX = PB6 | PB13
+//! - RX = PB5 | PB12
+//! - Interrupt = CAN2
 
 use crate::afio::MAPR;
 use crate::gpio::{
@@ -14,8 +20,12 @@ use crate::gpio::{
     gpiob::{PB8, PB9},
     Alternate, Floating, Input, PushPull,
 };
+#[cfg(feature = "connectivity")]
+use crate::gpio::gpiob::{PB5, PB6, PB12, PB13};
 use crate::rcc::{APB1,Enable};
-use crate::device::{CAN1, USB};
+use crate::device::{can1, CAN1, USB};
+#[cfg(feature = "connectivity")]
+use crate::device::CAN2;
 use core::marker::PhantomData;
 
 use core::convert::Infallible;
@@ -261,7 +271,10 @@ pub struct Configuration {
     pub time_quantum_length: u16,
 }
 
-pub const FILTERBANKCOUNT: FilterBankIndex = 14; //in case of STM32F105xC, STM32F105xC this should be 28
+#[cfg(not(feature = "connectivity"))]
+pub const FILTERBANKCOUNT: FilterBankIndex = 14;
+#[cfg(feature = "connectivity")]
+pub const FILTERBANKCOUNT: FilterBankIndex = 28;
 pub type FilterBankIndex = u8; //[0..FILTERBANKCOUNT-1] is valid
 
 pub enum FilterMode {
@@ -308,6 +321,24 @@ pub enum Error {
     NotEmptyTxMailBox,
 }
 
+pub trait CanPeripheral {
+    fn ptr() -> *const can1::RegisterBlock;
+}
+
+impl CanPeripheral for CAN1 {
+    fn ptr() -> *const can1::RegisterBlock {
+        CAN1::ptr()
+    }
+}
+
+#[cfg(feature = "connectivity")]
+impl CanPeripheral for CAN2 {
+    fn ptr() -> *const can1::RegisterBlock {
+        // Register block definitions are the same.
+        CAN2::ptr() as *const can1::RegisterBlock
+    }
+}
+
 pub trait Pins<CAN> {
     const REMAP: u8;
 }
@@ -320,8 +351,21 @@ impl Pins<CAN1> for (PB9<Alternate<PushPull>>, PB8<Input<Floating>>) {
     const REMAP: u8 = 0b10;
 }
 
+#[cfg(feature = "connectivity")]
+impl Pins<CAN2> for (PB13<Alternate<PushPull>>, PB12<Input<Floating>>) {
+    const REMAP: u8 = 0;
+}
+
+#[cfg(feature = "connectivity")]
+impl Pins<CAN2> for (PB6<Alternate<PushPull>>, PB5<Input<Floating>>) {
+    const REMAP: u8 = 1;
+}
+
 /// CAN abstraction
-pub struct Can<CAN, PINS> {
+pub struct Can<CAN, PINS>
+where
+    CAN: CanPeripheral,
+{
     can: CAN,
     pins: PINS,
     /// The USB and CAN share a dedicated 512-byte SRAM memory for data
@@ -348,7 +392,10 @@ impl<PINS> Can<CAN1, PINS> {
 
         // choose pin mapping
         #[allow(unused_unsafe)]
+        #[cfg(not(feature = "connectivity"))]
         mapr.modify_mapr(|_, w| unsafe { w.can_remap().bits(PINS::REMAP) });
+        #[cfg(feature = "connectivity")]
+        mapr.modify_mapr(|_, w| unsafe { w.can1_remap().bits(PINS::REMAP) });
 
         Can {
             can: can,
@@ -357,12 +404,57 @@ impl<PINS> Can<CAN1, PINS> {
         }
     }
 
+    /// releasing the resources
+    /// (required for example to use USB instead of CAN)
+    pub fn release(self, apb1: &mut APB1) -> (CAN1, PINS, USB) {
+        CAN1::disable(apb1);
+        (self.can, self.pins, self._usb)
+    }
+}
+
+#[cfg(feature = "connectivity")]
+impl<PINS> Can<CAN2, PINS> {
+    pub fn can2(can: CAN2, pins: PINS, mapr: &mut MAPR, apb1: &mut APB1, usb: USB) -> Can<CAN2, PINS>
+    where
+        PINS: Pins<CAN2>,
+    {
+        // power up CAN peripheral
+        CAN1::enable(apb1);
+        CAN2::enable(apb1);
+
+        // delay after an RCC peripheral clock enabling
+        apb1.enr().read();
+
+        // choose pin mapping
+        mapr.modify_mapr(|_, w| w.can2_remap().bit(PINS::REMAP == 1));
+
+        Can {
+            can: can,
+            pins: pins,
+            _usb: usb,
+        }
+    }
+
+    /// releasing the resources
+    /// (required for example to use USB instead of CAN)
+    pub fn release(self, apb1: &mut APB1) -> (CAN2, PINS, USB) {
+        CAN2::disable(apb1);
+        CAN1::disable(apb1);
+        (self.can, self.pins, self._usb)
+    }
+}
+
+impl<PINS, CAN> Can<CAN, PINS>
+where
+    CAN: CanPeripheral,
+{
     /// moves from Sleep or Normal to Initialization mode
     fn to_initialization(&mut self) -> nb::Result<(), Infallible> {
-        let msr = self.can.msr.read();
+        let can = unsafe { &*CAN::ptr() };
+        let msr = can.msr.read();
         if msr.slak().bit_is_set() || msr.inak().bit_is_clear() {
             // request exit from sleep and enter initialization modes
-            self.can
+            can
                 .mcr
                 .write(|w| w.sleep().clear_bit().inrq().set_bit());
             Err(nb::Error::WouldBlock)
@@ -375,13 +467,15 @@ impl<PINS> Can<CAN1, PINS> {
     /// CAN bus are stopped and the status of the CAN bus output CANTX is
     /// recessive (high).
     pub fn configure(&mut self, config: &Configuration) {
+        let can = unsafe { &*CAN::ptr() };
+
         let slept = self.is_sleeping();
 
         // exit from sleep mode, request initialization
         while let Err(nb::Error::WouldBlock) = self.to_initialization() {}
 
         // Update register MCR
-        self.can.mcr.modify(|_, w| {
+        can.mcr.modify(|_, w| {
             w.ttcm()
                 .bit(config.time_triggered_communication_mode)
                 .abom()
@@ -397,7 +491,7 @@ impl<PINS> Can<CAN1, PINS> {
         });
 
         //Set the bit timing register
-        self.can.btr.modify(|_, w| unsafe {
+        can.btr.modify(|_, w| unsafe {
             w.silm()
                 .bit(config.silent_mode)
                 .lbkm()
@@ -433,15 +527,17 @@ impl<PINS> Can<CAN1, PINS> {
     }
 
     pub fn is_sleeping(&self) -> bool {
-        self.can.msr.read().slak().bit_is_set()
+        let can = unsafe { &*CAN::ptr() };
+        can.msr.read().slak().bit_is_set()
     }
 
     /// moves from Sleep to Normal mode
     pub fn to_normal(&mut self) -> nb::Result<(), Infallible> {
-        let msr = self.can.msr.read();
+        let can = unsafe { &*CAN::ptr() };
+        let msr = can.msr.read();
         if msr.slak().bit_is_set() || msr.inak().bit_is_set() {
             // request exit from both sleep and initialization modes
-            self.can
+            can
                 .mcr
                 .write(|w| w.sleep().clear_bit().inrq().clear_bit());
             Err(nb::Error::WouldBlock)
@@ -452,10 +548,11 @@ impl<PINS> Can<CAN1, PINS> {
 
     /// moves from Normal to Sleep mode
     pub fn to_sleep(&mut self) -> nb::Result<(), Infallible> {
-        let msr = self.can.msr.read();
+        let can = unsafe { &*CAN::ptr() };
+        let msr = can.msr.read();
         if msr.slak().bit_is_clear() || msr.inak().bit_is_set() {
             // request exit from both sleep and initialization modes
-            self.can
+            can
                 .mcr
                 .write(|w| w.sleep().set_bit().inrq().clear_bit());
             Err(nb::Error::WouldBlock)
@@ -464,14 +561,9 @@ impl<PINS> Can<CAN1, PINS> {
         }
     }
 
-    /// releasing the resources
-    /// (required for example to use USB instead of CAN)
-    pub fn release(self, apb1: &mut APB1) -> (CAN1, PINS, USB) {
-        apb1.enr().write(|w| w.canen().clear_bit());
-        (self.can, self.pins, self._usb)
-    }
-
     pub fn activate_filter_bank(&mut self, index: FilterBankIndex, activate: bool) {
+        let can = unsafe { &*CAN::ptr() };
+
         if index >= FILTERBANKCOUNT {
             return; // Err(Error::InvalidArgument);
         }
@@ -479,11 +571,11 @@ impl<PINS> Can<CAN1, PINS> {
         let bit = 1u32 << index;
 
         if activate {
-            self.can
+            can
                 .fa1r
                 .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
         } else {
-            self.can
+            can
                 .fa1r
                 .modify(|r, w| unsafe { w.bits(r.bits() & (!bit)) });
         }
@@ -494,6 +586,8 @@ impl<PINS> Can<CAN1, PINS> {
         index: FilterBankIndex,
         config: &FilterBankConfiguration,
     ) {
+        let can = unsafe { &*CAN::ptr() };
+
         if index >= FILTERBANKCOUNT {
             return; // Err(Error::InvalidArgument);
         }
@@ -508,10 +602,10 @@ impl<PINS> Can<CAN1, PINS> {
         let nbit = !bit;
 
         // Initialization mode for the filter
-        self.can.fmr.write(|w| w.finit().bit(true));
+        can.fmr.write(|w| w.finit().bit(true));
 
         //Filter deactivation
-        self.can
+        can
             .fa1r
             .modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
 
@@ -519,13 +613,13 @@ impl<PINS> Can<CAN1, PINS> {
         match config.mode {
             FilterMode::Mask => {
                 //Id/Mask mode for the filter
-                self.can
+                can
                     .fm1r
                     .modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
             }
             FilterMode::List => {
                 //Identifier list mode for the filter
-                self.can
+                can
                     .fm1r
                     .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
             }
@@ -534,12 +628,12 @@ impl<PINS> Can<CAN1, PINS> {
         // Filter FIFO assignment
         match config.fifo_assignment {
             0 => {
-                self.can
+                can
                     .ffa1r
                     .modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
             }
             1 => {
-                self.can
+                can
                     .ffa1r
                     .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
             }
@@ -552,7 +646,7 @@ impl<PINS> Can<CAN1, PINS> {
         match config.info {
             FilterInfo::Halves((ref low, ref high)) => {
                 // 16-bit scale for the filter
-                self.can
+                can
                     .fs1r
                     .modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
 
@@ -568,7 +662,7 @@ impl<PINS> Can<CAN1, PINS> {
             }
             FilterInfo::Whole(ref whole) => {
                 // 32-bit scale for the filter
-                self.can
+                can
                     .fs1r
                     .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
 
@@ -584,27 +678,28 @@ impl<PINS> Can<CAN1, PINS> {
 
         // Filter activation
         if config.active {
-            self.can
+            can
                 .fa1r
                 .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
         }
 
         // Leave the initialisation mode for the filter
-        self.can.fmr.write(|w| w.finit().bit(false));
+        can.fmr.write(|w| w.finit().bit(false));
     }
 
     //private helper function to get indexed access to the filter registers
     fn fill_filter_registers(&self, index: FilterBankIndex, r1: u32, r2: u32) {
-        self.can.fb[index as usize]
+        let can = unsafe { &*CAN::ptr() };
+        can.fb[index as usize]
             .fr1
             .write(|w| unsafe { w.bits(r1) });
-        self.can.fb[index as usize]
+        can.fb[index as usize]
             .fr1
             .write(|w| unsafe { w.bits(r2) });
     }
 
     //TODO a join function may be needed also (which is the reverse of this one)...
-    pub fn split(self) -> (Tx<CAN1>, Rx<CAN1>) {
+    pub fn split(self) -> (Tx<CAN>, Rx<CAN>) {
         (Tx { _can: PhantomData }, Rx { _can: PhantomData })
     }
 
@@ -716,17 +811,10 @@ pub struct TxMailBox<CAN, IDX> {
 
 pub type TxMailBoxIndex = u8; //[0..2] is valid
 
-//TODO search a better API for this...
-///returns the index of an empty or the less important mailbox as candidate
-pub fn recommend_transmitter() -> TxMailBoxIndex {
-    //TODO return error in sleep, init mode?
-
-    // NOTE(unsafe) atomic read with no side effects?
-    let tsr = unsafe { &*CAN1::ptr() }.tsr.read();
-    let autoidx = tsr.code().bits();
-
-    autoidx
-}
+//type state
+pub struct TxMailBox0;
+pub struct TxMailBox1;
+pub struct TxMailBox2;
 
 macro_rules! TxMailBox {
     ($CANX:ident, [
@@ -734,9 +822,6 @@ macro_rules! TxMailBox {
         $alsti:ident, $txoki:ident, $rqcpi:ident, $abrqi:ident),)+
     ]) => {
         $(
-            //type state
-            pub struct $TxMailBoxi;
-
             impl TransmitMailbox for TxMailBox<$CANX, $TxMailBoxi>
             {
                 const INDEX: TxMailBoxIndex = $i;
@@ -841,6 +926,13 @@ TxMailBox!(CAN1, [
     TxMailBox2: (2, tme2, low2, terr2, alst2, txok2, rqcp2, abrq2),
 ]);
 
+#[cfg(feature = "connectivity")]
+TxMailBox!(CAN2, [
+    TxMailBox0: (0, tme0, low0, terr0, alst0, txok0, rqcp0, abrq0),
+    TxMailBox1: (1, tme1, low1, terr1, alst1, txok1, rqcp1, abrq1),
+    TxMailBox2: (2, tme2, low2, terr2, alst2, txok2, rqcp2, abrq2),
+]);
+
 pub type RxFifoIndex = u8; //[0..1] is valid
 pub type FilterMatchIndex = u8;
 pub type TimeStamp = u16;
@@ -854,6 +946,10 @@ pub trait ReceiveFifo {
     fn read(&mut self) -> nb::Result<(FilterMatchIndex, TimeStamp, Frame), Infallible>;
 }
 
+//type state
+pub struct RxFifo0;
+pub struct RxFifo1;
+
 pub struct RxFifo<CAN, IDX> {
     _can: PhantomData<CAN>,
     _index: PhantomData<IDX>,
@@ -864,9 +960,6 @@ macro_rules! RxFifo {
         $($RxFifoi:ident: ($i:expr, ),)+
     ]) => {
         $(
-            //type state
-            pub struct $RxFifoi;
-
             impl ReceiveFifo for RxFifo<$CANX, $RxFifoi> {
                 const INDEX: RxFifoIndex = $i;
 
@@ -915,6 +1008,12 @@ macro_rules! RxFifo {
 }
 
 RxFifo!(CAN1, [
+    RxFifo0: (0,),
+    RxFifo1: (1,),
+]);
+
+#[cfg(feature = "connectivity")]
+RxFifo!(CAN2, [
     RxFifo0: (0,),
     RxFifo1: (1,),
 ]);

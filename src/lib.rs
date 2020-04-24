@@ -128,7 +128,7 @@ pub mod backup_domain;
 #[cfg(feature = "device-selected")]
 pub mod bb;
 #[cfg(feature = "device-selected")]
-#[cfg(feature = "stm32f103")]
+#[cfg(any(feature = "stm32f103", feature = "connectivity"))]
 pub mod can;
 #[cfg(feature = "device-selected")]
 pub mod delay;
