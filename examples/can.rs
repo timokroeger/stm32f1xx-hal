@@ -107,18 +107,18 @@ fn main() -> ! {
 
     let (mut tx0, mut tx1, mut tx2) = tx.split();
 
-    let txresult0 = tx0.request_transmit(&can::Frame::new(id10, can::Payload::new(b"0")));
-    let txresult1 = tx1.request_transmit(&can::Frame::new(id11, can::Payload::new(b"1")));
-    let txresult2 = tx2.request_transmit(&can::Frame::new(id12, can::Payload::new(b"2")));
+    let txresult0 = tx0.request_transmit(&can::Frame::new(id10, b"0"));
+    let txresult1 = tx1.request_transmit(&can::Frame::new(id11, b"1"));
+    let txresult2 = tx2.request_transmit(&can::Frame::new(id12, b"2"));
     writeln!(
         hstdout,
         "tx: {:?} {:?} {:?}",
         &txresult0, &txresult1, &txresult2
     )
     .unwrap(); //while this printing slowly, all 3 messages are transfered
-    let txresult0 = tx0.request_transmit(&can::Frame::new(id13, can::Payload::new(b"3")));
-    let txresult1 = tx1.request_transmit(&can::Frame::new(id14, can::Payload::new(b"4")));
-    let txresult2 = tx2.request_transmit(&can::Frame::new(id15, can::Payload::new(b"5")));
+    let txresult0 = tx0.request_transmit(&can::Frame::new(id13, b"3"));
+    let txresult1 = tx1.request_transmit(&can::Frame::new(id14, b"4"));
+    let txresult2 = tx2.request_transmit(&can::Frame::new(id15, b"5"));
     writeln!(
         hstdout,
         "tx: {:?} {:?} {:?}",
@@ -131,12 +131,12 @@ fn main() -> ! {
         if let Ok((filter_match_index, time, frame)) = rx0.read() {
             writeln!(
                 hstdout,
-                "rx0: {} {} {} {} {}",
+                "rx0: {} {} {} {} {:?}",
                 filter_match_index,
                 frame.id().standard(),
                 time,
                 frame.data().len(),
-                frame.data().data_as_u64()
+                frame.data()
             )
             .unwrap();
         };
@@ -144,12 +144,12 @@ fn main() -> ! {
         if let Ok((filter_match_index, time, frame)) = rx1.read() {
             writeln!(
                 hstdout,
-                "rx1: {} {} {} {} {}",
+                "rx1: {} {} {} {} {:?}",
                 filter_match_index,
                 frame.id().standard(),
                 time,
                 frame.data().len(),
-                frame.data().data_as_u64()
+                frame.data()
             )
             .unwrap();
         };

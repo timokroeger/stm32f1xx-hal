@@ -28,9 +28,7 @@ use crate::gpio::{
     Alternate, Floating, Input, PushPull,
 };
 use crate::rcc::{Enable, APB1};
-use core::marker::PhantomData;
-
-use core::convert::Infallible;
+use core::{convert::Infallible, convert::TryInto, marker::PhantomData};
 
 #[derive(Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Id {
@@ -101,79 +99,27 @@ impl Id {
     }
 }
 
-pub struct Payload {
-    dlc: u8,
-
-    // this below would not be not OK in case of CAN FD where the max data length is 64 byte (not only 8)
-    // however can fd is not supported on this microcontroller, so here this implementation is fine
-    data_low: u32,
-    data_high: u32,
-}
-
-impl Payload {
-    pub fn new(data: &[u8]) -> Payload {
-        let n = data.len() as u32;
-        Payload {
-            dlc: n as u8,
-            data_low: if n > 0 {
-                let mut l: u32 = data[0] as u32;
-                if n > 1 {
-                    l |= (data[1] as u32) << 8;
-                    if n > 2 {
-                        l |= (data[2] as u32) << 16;
-                        if n > 3 {
-                            l |= (data[3] as u32) << 24;
-                        }
-                    }
-                }
-                l
-            } else {
-                0
-            },
-
-            data_high: if n > 4 {
-                let mut h: u32 = data[4] as u32;
-                if n > 5 {
-                    h |= (data[5] as u32) << 8;
-                    if n > 6 {
-                        h |= (data[6] as u32) << 16;
-                        if n > 7 {
-                            h |= (data[7] as u32) << 24;
-                        }
-                    }
-                }
-                h
-            } else {
-                0
-            },
-        }
-    }
-
-    //length of the payload in bytes [0..8]
-    pub fn len(&self) -> u8 {
-        self.dlc
-    }
-
-    //little endian
-    pub fn data_as_u64(&self) -> u64 {
-        (self.data_low as u64) | ((self.data_high as u64) << 32)
-    }
-}
-
 pub struct Frame {
     id: Id,
-    data: Payload,
+    dlc: usize,
+    data: [u8; 8],
 }
 
 impl Frame {
-    pub fn new(id: Id, data: Payload) -> Frame {
-        Frame { id: id, data: data }
+    pub fn new(id: Id, data: &[u8]) -> Self {
+        let mut frame = Self {
+            id,
+            dlc: data.len(),
+            data: [0; 8],
+        };
+        frame.data[0..data.len()].copy_from_slice(data);
+        frame
     }
     pub fn id(&self) -> &Id {
         &self.id
     }
-    pub fn data(&self) -> &Payload {
-        &self.data
+    pub fn data(&self) -> &[u8] {
+        &self.data[0..self.dlc]
     }
 }
 
@@ -910,17 +856,17 @@ macro_rules! TxMailBox {
                 //TODO use a message struct as input
                 fn request_transmit(&mut self, frame: &Frame) -> Result<(), Error> {
                     if self.is_empty() {
-                        if frame.data.dlc > 8 {
+                        if frame.dlc > 8 {
                             return Err(Error::TooLongPayload);
                         }
 
                         let tx = &(unsafe { &*$CANX::ptr() }.tx[$i]);
 
                         //fill message length [0..8]
-                        tx.tdtr.write(|w| unsafe { w.dlc().bits(frame.data.dlc) });
+                        tx.tdtr.write(|w| unsafe { w.dlc().bits(frame.dlc as u8) });
 
-                        tx.tdlr.write(|w| unsafe { w.bits(frame.data.data_low) });
-                        tx.tdhr.write(|w| unsafe { w.bits(frame.data.data_high) });
+                        tx.tdlr.write(|w| unsafe { w.bits(u32::from_ne_bytes(frame.data[0..4].try_into().unwrap())) });
+                        tx.tdhr.write(|w| unsafe { w.bits(u32::from_ne_bytes(frame.data[4..8].try_into().unwrap())) });
 
                         // Bits 31:21 STID[10:0]: Standard Identifier
                         //             The standard part of the identifier.
@@ -1022,14 +968,13 @@ macro_rules! RxFifo {
                         let filter_match_index = rdtir.fmi().bits();
                         let time = rdtir.time().bits();
 
-                        let frame = Frame {
+                        let mut frame = Frame {
                             id: Id::from_received_register(rx.rir.read().bits()),
-                            data: Payload {
-                                dlc: rdtir.dlc().bits(),
-                                data_low: rx.rdlr.read().bits(),
-                                data_high: rx.rdhr.read().bits(),
-                            },
+                            dlc: rdtir.dlc().bits() as usize,
+                            data: [0; 8],
                         };
+                        frame.data[0..4].copy_from_slice(&rx.rdlr.read().bits().to_ne_bytes());
+                        frame.data[4..8].copy_from_slice(&rx.rdhr.read().bits().to_ne_bytes());
 
                         //after every info captured release fifo output mailbox:
                         unsafe { &*$CANX::ptr() }.rfr[$i].write(|w| w.rfom().set_bit());
