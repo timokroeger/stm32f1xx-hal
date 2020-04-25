@@ -7,25 +7,25 @@
 //! - TX = PA12 | PB9
 //! - RX = PA11 | PB8
 //! - Interrupt = CAN1
-//! 
+//!
 //! # CAN2
-//! 
+//!
 //! - TX = PB6 | PB13
 //! - RX = PB5 | PB12
 //! - Interrupt = CAN2
 
 use crate::afio::MAPR;
+#[cfg(feature = "connectivity")]
+use crate::device::CAN2;
+use crate::device::{can1, CAN1, USB};
+#[cfg(feature = "connectivity")]
+use crate::gpio::gpiob::{PB12, PB13, PB5, PB6};
 use crate::gpio::{
     gpioa::{PA11, PA12},
     gpiob::{PB8, PB9},
     Alternate, Floating, Input, PushPull,
 };
-#[cfg(feature = "connectivity")]
-use crate::gpio::gpiob::{PB5, PB6, PB12, PB13};
-use crate::rcc::{APB1,Enable};
-use crate::device::{can1, CAN1, USB};
-#[cfg(feature = "connectivity")]
-use crate::device::CAN2;
+use crate::rcc::{Enable, APB1};
 use core::marker::PhantomData;
 
 use core::convert::Infallible;
@@ -380,7 +380,13 @@ where
 /// In this mode, the bxCAN clock is stopped, however software can still access
 /// the bxCAN mailboxes.
 impl<PINS> Can<CAN1, PINS> {
-    pub fn can1(can: CAN1, pins: PINS, mapr: &mut MAPR, apb1: &mut APB1, usb: USB) -> Can<CAN1, PINS>
+    pub fn can1(
+        can: CAN1,
+        pins: PINS,
+        mapr: &mut MAPR,
+        apb1: &mut APB1,
+        usb: USB,
+    ) -> Can<CAN1, PINS>
     where
         PINS: Pins<CAN1>,
     {
@@ -398,8 +404,8 @@ impl<PINS> Can<CAN1, PINS> {
         mapr.modify_mapr(|_, w| unsafe { w.can1_remap().bits(PINS::REMAP) });
 
         Can {
-            can: can,
-            pins: pins,
+            can,
+            pins,
             _usb: usb,
         }
     }
@@ -414,7 +420,13 @@ impl<PINS> Can<CAN1, PINS> {
 
 #[cfg(feature = "connectivity")]
 impl<PINS> Can<CAN2, PINS> {
-    pub fn can2(can: CAN2, pins: PINS, mapr: &mut MAPR, apb1: &mut APB1, usb: USB) -> Can<CAN2, PINS>
+    pub fn can2(
+        can: CAN2,
+        pins: PINS,
+        mapr: &mut MAPR,
+        apb1: &mut APB1,
+        usb: USB,
+    ) -> Can<CAN2, PINS>
     where
         PINS: Pins<CAN2>,
     {
@@ -429,8 +441,8 @@ impl<PINS> Can<CAN2, PINS> {
         mapr.modify_mapr(|_, w| w.can2_remap().bit(PINS::REMAP == 1));
 
         Can {
-            can: can,
-            pins: pins,
+            can,
+            pins,
             _usb: usb,
         }
     }
@@ -454,9 +466,7 @@ where
         let msr = can.msr.read();
         if msr.slak().bit_is_set() || msr.inak().bit_is_clear() {
             // request exit from sleep and enter initialization modes
-            can
-                .mcr
-                .write(|w| w.sleep().clear_bit().inrq().set_bit());
+            can.mcr.write(|w| w.sleep().clear_bit().inrq().set_bit());
             Err(nb::Error::WouldBlock)
         } else {
             Ok(())
@@ -537,9 +547,7 @@ where
         let msr = can.msr.read();
         if msr.slak().bit_is_set() || msr.inak().bit_is_set() {
             // request exit from both sleep and initialization modes
-            can
-                .mcr
-                .write(|w| w.sleep().clear_bit().inrq().clear_bit());
+            can.mcr.write(|w| w.sleep().clear_bit().inrq().clear_bit());
             Err(nb::Error::WouldBlock)
         } else {
             Ok(())
@@ -552,9 +560,7 @@ where
         let msr = can.msr.read();
         if msr.slak().bit_is_clear() || msr.inak().bit_is_set() {
             // request exit from both sleep and initialization modes
-            can
-                .mcr
-                .write(|w| w.sleep().set_bit().inrq().clear_bit());
+            can.mcr.write(|w| w.sleep().set_bit().inrq().clear_bit());
             Err(nb::Error::WouldBlock)
         } else {
             Ok(())
@@ -571,13 +577,9 @@ where
         let bit = 1u32 << index;
 
         if activate {
-            can
-                .fa1r
-                .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
+            can.fa1r.modify(|r, w| unsafe { w.bits(r.bits() | bit) });
         } else {
-            can
-                .fa1r
-                .modify(|r, w| unsafe { w.bits(r.bits() & (!bit)) });
+            can.fa1r.modify(|r, w| unsafe { w.bits(r.bits() & (!bit)) });
         }
     }
 
@@ -605,37 +607,27 @@ where
         can.fmr.write(|w| w.finit().bit(true));
 
         //Filter deactivation
-        can
-            .fa1r
-            .modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
+        can.fa1r.modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
 
         //Filter Mode
         match config.mode {
             FilterMode::Mask => {
                 //Id/Mask mode for the filter
-                can
-                    .fm1r
-                    .modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
+                can.fm1r.modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
             }
             FilterMode::List => {
                 //Identifier list mode for the filter
-                can
-                    .fm1r
-                    .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
+                can.fm1r.modify(|r, w| unsafe { w.bits(r.bits() | bit) });
             }
         };
 
         // Filter FIFO assignment
         match config.fifo_assignment {
             0 => {
-                can
-                    .ffa1r
-                    .modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
+                can.ffa1r.modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
             }
             1 => {
-                can
-                    .ffa1r
-                    .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
+                can.ffa1r.modify(|r, w| unsafe { w.bits(r.bits() | bit) });
             }
             _ => {
                 //return Err(Error::InvalidArgument);
@@ -646,9 +638,7 @@ where
         match config.info {
             FilterInfo::Halves((ref low, ref high)) => {
                 // 16-bit scale for the filter
-                can
-                    .fs1r
-                    .modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
+                can.fs1r.modify(|r, w| unsafe { w.bits(r.bits() & nbit) });
 
                 // First 16-bit identifier and First 16-bit mask
                 // Or First 16-bit identifier and Second 16-bit identifier
@@ -662,9 +652,7 @@ where
             }
             FilterInfo::Whole(ref whole) => {
                 // 32-bit scale for the filter
-                can
-                    .fs1r
-                    .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
+                can.fs1r.modify(|r, w| unsafe { w.bits(r.bits() | bit) });
 
                 //32-bit identifier or First 32-bit identifier,
                 //32-bit mask or Second 32-bit identifier
@@ -678,9 +666,7 @@ where
 
         // Filter activation
         if config.active {
-            can
-                .fa1r
-                .modify(|r, w| unsafe { w.bits(r.bits() | bit) });
+            can.fa1r.modify(|r, w| unsafe { w.bits(r.bits() | bit) });
         }
 
         // Leave the initialisation mode for the filter
@@ -690,12 +676,8 @@ where
     //private helper function to get indexed access to the filter registers
     fn fill_filter_registers(&self, index: FilterBankIndex, r1: u32, r2: u32) {
         let can = unsafe { &*CAN::ptr() };
-        can.fb[index as usize]
-            .fr1
-            .write(|w| unsafe { w.bits(r1) });
-        can.fb[index as usize]
-            .fr1
-            .write(|w| unsafe { w.bits(r2) });
+        can.fb[index as usize].fr1.write(|w| unsafe { w.bits(r1) });
+        can.fb[index as usize].fr1.write(|w| unsafe { w.bits(r2) });
     }
 
     //TODO a join function may be needed also (which is the reverse of this one)...
