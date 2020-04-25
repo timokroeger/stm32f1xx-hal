@@ -17,7 +17,9 @@
 use crate::afio::MAPR;
 #[cfg(feature = "connectivity")]
 use crate::device::CAN2;
-use crate::device::{can1, CAN1, USB};
+use crate::device::{can1, CAN1};
+#[cfg(not(feature = "connectivity"))]
+use crate::device::USB;
 #[cfg(feature = "connectivity")]
 use crate::gpio::gpiob::{PB12, PB13, PB5, PB6};
 use crate::gpio::{
@@ -368,11 +370,13 @@ where
 {
     can: CAN,
     pins: PINS,
+
     /// The USB and CAN share a dedicated 512-byte SRAM memory for data
     /// transmission and reception, and so they cannot be used concurrently
     /// (the shared SRAM is accessed through CAN and USB exclusively).
     /// The USB and CAN can be used in the same application but not
     /// at the same time.
+    #[cfg(not(feature = "connectivity"))]
     _usb: USB,
 }
 
@@ -380,6 +384,7 @@ where
 /// In this mode, the bxCAN clock is stopped, however software can still access
 /// the bxCAN mailboxes.
 impl<PINS> Can<CAN1, PINS> {
+    #[cfg(not(feature = "connectivity"))]
     pub fn can1(
         can: CAN1,
         pins: PINS,
@@ -398,10 +403,7 @@ impl<PINS> Can<CAN1, PINS> {
 
         // choose pin mapping
         #[allow(unused_unsafe)]
-        #[cfg(not(feature = "connectivity"))]
         mapr.modify_mapr(|_, w| unsafe { w.can_remap().bits(PINS::REMAP) });
-        #[cfg(feature = "connectivity")]
-        mapr.modify_mapr(|_, w| unsafe { w.can1_remap().bits(PINS::REMAP) });
 
         Can {
             can,
@@ -410,11 +412,35 @@ impl<PINS> Can<CAN1, PINS> {
         }
     }
 
+    #[cfg(feature = "connectivity")]
+    pub fn can1(can: CAN1, pins: PINS, mapr: &mut MAPR, apb1: &mut APB1) -> Can<CAN1, PINS>
+    where
+        PINS: Pins<CAN1>,
+    {
+        // power up CAN peripheral
+        CAN1::enable(apb1);
+
+        // delay after an RCC peripheral clock enabling
+        apb1.enr().read();
+
+        // choose pin mapping
+        mapr.modify_mapr(|_, w| unsafe { w.can1_remap().bits(PINS::REMAP) });
+
+        Can { can, pins }
+    }
+
     /// releasing the resources
     /// (required for example to use USB instead of CAN)
+    #[cfg(not(feature = "connectivity"))]
     pub fn release(self, apb1: &mut APB1) -> (CAN1, PINS, USB) {
         CAN1::disable(apb1);
         (self.can, self.pins, self._usb)
+    }
+
+    #[cfg(feature = "connectivity")]
+    pub fn release(self, apb1: &mut APB1) -> (CAN1, PINS) {
+        CAN1::disable(apb1);
+        (self.can, self.pins)
     }
 }
 
@@ -425,7 +451,6 @@ impl<PINS> Can<CAN2, PINS> {
         pins: PINS,
         mapr: &mut MAPR,
         apb1: &mut APB1,
-        usb: USB,
     ) -> Can<CAN2, PINS>
     where
         PINS: Pins<CAN2>,
@@ -440,19 +465,15 @@ impl<PINS> Can<CAN2, PINS> {
         // choose pin mapping
         mapr.modify_mapr(|_, w| w.can2_remap().bit(PINS::REMAP == 1));
 
-        Can {
-            can,
-            pins,
-            _usb: usb,
-        }
+        Can { can, pins }
     }
 
     /// releasing the resources
     /// (required for example to use USB instead of CAN)
-    pub fn release(self, apb1: &mut APB1) -> (CAN2, PINS, USB) {
+    pub fn release(self, apb1: &mut APB1) -> (CAN2, PINS) {
         CAN2::disable(apb1);
         CAN1::disable(apb1);
-        (self.can, self.pins, self._usb)
+        (self.can, self.pins)
     }
 }
 
