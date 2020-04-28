@@ -35,6 +35,7 @@ use crate::gpio::{
 };
 use crate::rcc::{Enable, APB1};
 use core::{convert::Infallible, convert::TryInto, marker::PhantomData};
+use typenum::{marker_traits::Unsigned, U0, U1};
 
 mod sealed {
     pub trait Pins {
@@ -843,7 +844,7 @@ pub struct Rx<CAN> {
 }
 
 impl<CAN> Rx<CAN> {
-    pub fn split(self) -> (RxFifo<CAN, RxFifo0>, RxFifo<CAN, RxFifo1>) {
+    pub fn split(self) -> (RxFifo<CAN, U0>, RxFifo<CAN, U1>) {
         (
             RxFifo {
                 _can: PhantomData,
@@ -992,80 +993,66 @@ pub type TimeStamp = u16;
 
 //TODO put a part of this in the HAL as ReceiveFifo trait?
 pub trait ReceiveFifo {
-    const INDEX: RxFifoIndex;
     fn has_overun(&self) -> bool;
     fn is_full(&self) -> bool;
     fn pending_count(&self) -> u8;
     fn read(&mut self) -> nb::Result<(FilterMatchIndex, TimeStamp, Frame), Infallible>;
 }
 
-//type state
-pub struct RxFifo0;
-pub struct RxFifo1;
-
 pub struct RxFifo<CAN, IDX> {
     _can: PhantomData<CAN>,
     _index: PhantomData<IDX>,
 }
 
-macro_rules! RxFifo {
-    ($CANX:ident, [
-        $($RxFifoi:ident: ($i:expr, ),)+
-    ]) => {
-        $(
-            impl ReceiveFifo for RxFifo<$CANX, $RxFifoi> {
-                const INDEX: RxFifoIndex = $i;
+impl<CAN, IDX> ReceiveFifo for RxFifo<CAN, IDX>
+where
+    CAN: CanPeripheral,
+    IDX: Unsigned,
+{
+    fn has_overun(&self) -> bool {
+        unsafe { &*CAN::ptr() }.rfr[IDX::to_usize()]
+            .read()
+            .fovr()
+            .bit()
+    }
 
-                fn has_overun(&self) -> bool {
-                    unsafe { &*$CANX::ptr() }.rfr[$i].read().fovr().bit()
-                }
+    fn is_full(&self) -> bool {
+        unsafe { &*CAN::ptr() }.rfr[IDX::to_usize()]
+            .read()
+            .full()
+            .bit()
+    }
 
-                fn is_full(&self) -> bool {
-                    unsafe { &*$CANX::ptr() }.rfr[$i].read().full().bit()
-                }
+    fn pending_count(&self) -> u8 {
+        unsafe { &*CAN::ptr() }.rfr[IDX::to_usize()]
+            .read()
+            .fmp()
+            .bits()
+    }
 
-                fn pending_count(&self) -> u8 {
-                     unsafe { &*$CANX::ptr() }.rfr[$i].read().fmp().bits()
-                }
+    fn read(&mut self) -> nb::Result<(FilterMatchIndex, TimeStamp, Frame), Infallible> {
+        let n = self.pending_count();
+        if n < 1 {
+            //there are no messages in the fifo
+            Err(nb::Error::WouldBlock)
+        } else {
+            let rx = &unsafe { &*CAN::ptr() }.rx[IDX::to_usize()];
+            let rdtir = rx.rdtr.read();
+            let filter_match_index = rdtir.fmi().bits();
+            let time = rdtir.time().bits();
 
-                fn read(&mut self) -> nb::Result<(FilterMatchIndex, TimeStamp, Frame), Infallible> {
-                    let n = self.pending_count();
-                    if n < 1 {
-                        //there are no messages in the fifo
-                        Err(nb::Error::WouldBlock)
-                    } else {
-                        let rx = &(unsafe { &*$CANX::ptr() }.rx[$i]);
-                        let rdtir = rx.rdtr.read();
-                        let filter_match_index = rdtir.fmi().bits();
-                        let time = rdtir.time().bits();
+            let mut frame = Frame {
+                id: Id::from_received_register(rx.rir.read().bits()),
+                dlc: rdtir.dlc().bits() as usize,
+                data: [0; 8],
+            };
+            frame.data[0..4].copy_from_slice(&rx.rdlr.read().bits().to_ne_bytes());
+            frame.data[4..8].copy_from_slice(&rx.rdhr.read().bits().to_ne_bytes());
 
-                        let mut frame = Frame {
-                            id: Id::from_received_register(rx.rir.read().bits()),
-                            dlc: rdtir.dlc().bits() as usize,
-                            data: [0; 8],
-                        };
-                        frame.data[0..4].copy_from_slice(&rx.rdlr.read().bits().to_ne_bytes());
-                        frame.data[4..8].copy_from_slice(&rx.rdhr.read().bits().to_ne_bytes());
+            //after every info captured release fifo output mailbox:
+            unsafe { &*CAN::ptr() }.rfr[IDX::to_usize()].write(|w| w.rfom().set_bit());
 
-                        //after every info captured release fifo output mailbox:
-                        unsafe { &*$CANX::ptr() }.rfr[$i].write(|w| w.rfom().set_bit());
-
-                        Ok((filter_match_index, time, frame))
-                    }
-                }
-            }
-
-        )+
+            Ok((filter_match_index, time, frame))
+        }
     }
 }
-
-RxFifo!(CAN1, [
-    RxFifo0: (0,),
-    RxFifo1: (1,),
-]);
-
-#[cfg(feature = "connectivity")]
-RxFifo!(CAN2, [
-    RxFifo0: (0,),
-    RxFifo1: (1,),
-]);
