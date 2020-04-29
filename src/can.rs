@@ -344,47 +344,12 @@ impl Pins<CAN2> for (PB6<Alternate<PushPull>>, PB5<Input<Floating>>) {
     const REMAP: u8 = 1;
 }
 
-/// A zero-size-type that represents an enabled CAN1 clock for the filter banks.
-///
-/// Connectivity line devcies (stm32105/stm32f107) share the filter banks
-/// between the two CAN peripheral instances. The filter bank is clocked by
-/// CAN1 and this struct represents an enabled CAN1/filter clock.
-/// CAN2 takes ownership of the filter clock to make sure it is enabled.
-/// The filter clock token can be obtained by
-/// 1. `Can::can1()` which returns it in addition to its instance API struct
-/// 2. `FilterClock::enable()` when only the CAN1 clock is required to
-///     construct CAN2.
-// Cannot be constructed outside of this module.
-pub struct FilterClock(());
-
-impl FilterClock {
-    /// Enable CAN1 clock to clock the filter bank for CAN2.
-    pub fn enable(_can: CAN1, apb1: &mut APB1) -> FilterClock {
-        FilterClock::enable_priv(apb1)
-    }
-
-    fn enable_priv(apb1: &mut APB1) -> FilterClock {
-        // power up CAN peripheral
-        CAN1::enable(apb1);
-
-        // delay after an RCC peripheral clock enabling
-        apb1.enr().read();
-
-        FilterClock(())
-    }
-
-    fn release(&self, apb1: &mut APB1) {
-        CAN1::disable(apb1);
-    }
-}
-
-pub struct Can<CAN, PINS>
+pub struct Can<CAN>
 where
     CAN: CanPeripheral,
 {
-    can: CAN,
-    pins: PINS,
-    clk: FilterClock,
+    can: PhantomData<CAN>,
+    filter_bank: FilterBank<CAN>,
 
     /// The USB and CAN share a dedicated 512-byte SRAM memory for data
     /// transmission and reception, and so they cannot be used concurrently
@@ -398,15 +363,14 @@ where
 /// To reduce power consumption, bxCAN has a low-power mode called Sleep mode.
 /// In this mode, the bxCAN clock is stopped, however software can still access
 /// the bxCAN mailboxes.
-impl<PINS> Can<CAN1, PINS> {
+impl Can<CAN1> {
     #[cfg(not(feature = "connectivity"))]
-    pub fn can1(
-        can: CAN1,
-        pins: PINS,
+    pub fn can1<PINS>(
+        filters: FilterBank<CAN1>,
+        _pins: PINS,
         mapr: &mut MAPR,
-        apb1: &mut APB1,
         usb: USB,
-    ) -> Can<CAN1, PINS>
+    ) -> Can<CAN1>
     where
         PINS: Pins<CAN1>,
     {
@@ -415,65 +379,89 @@ impl<PINS> Can<CAN1, PINS> {
         mapr.modify_mapr(|_, w| unsafe { w.can_remap().bits(PINS::REMAP) });
 
         Can {
-            can,
-            pins,
-            clk: FilterClock::enable_priv(apb1),
+            can: PhantomData,
+            filter_bank: filters,
             _usb: usb,
         }
     }
 
     #[cfg(feature = "connectivity")]
-    pub fn can1(
-        can: CAN1,
-        pins: PINS,
-        mapr: &mut MAPR,
-        apb1: &mut APB1,
-    ) -> (Can<CAN1, PINS>, FilterClock)
+    pub fn can1<PINS>(filters: FilterBank<CAN1>, _pins: PINS, mapr: &mut MAPR) -> Can<CAN1>
     where
         PINS: Pins<CAN1>,
     {
         // choose pin mapping
         mapr.modify_mapr(|_, w| unsafe { w.can1_remap().bits(PINS::REMAP) });
 
-        (
-            Can {
-                can,
-                pins,
-                clk: FilterClock::enable_priv(apb1),
-            },
-            FilterClock(()),
-        )
+        Can {
+            can: PhantomData,
+            filter_bank: filters,
+        }
     }
 
-    /// releasing the resources
-    /// (required for example to use USB instead of CAN)
+    /// Creates acceptance filters.
+    ///
+    /// To receive any data atleast one filter must be configured.
     #[cfg(not(feature = "connectivity"))]
-    pub fn release(self, apb1: &mut APB1) -> (CAN1, PINS, USB) {
-        self.clk.release(apb1);
-        (self.can, self.pins, self._usb)
+    pub fn filter_banks(_can: CAN1, apb1: &mut APB1) -> FilterBank<CAN1> {
+        CAN1::enable(apb1);
+
+        // delay after an RCC peripheral clock enabling
+        apb1.enr().read();
+
+        FilterBank {
+            split_idx: FILTERBANKCOUNT,
+            _can: PhantomData,
+        }
     }
 
+    /// Creates acceptance filters for CAN1 and CAN2.
+    ///
+    /// To receive any data atleast one filter must be configured.
+    ///
+    /// Enables the clock for CAN1 so that filters work for CAN2 even if CAN1
+    /// remains unused.
     #[cfg(feature = "connectivity")]
-    pub fn release(self, _clk: FilterClock, apb1: &mut APB1) -> (CAN1, PINS) {
-        self.clk.release(apb1);
-        (self.can, self.pins)
+    pub fn filter_banks(
+        can: CAN1,
+        apb1: &mut APB1,
+        split_idx: FilterBankIndex,
+    ) -> (FilterBank<CAN1>, FilterBank<CAN2>) {
+        assert!(split_idx <= FILTERBANKCOUNT);
+
+        CAN1::enable(apb1);
+
+        // delay after an RCC peripheral clock enabling
+        apb1.enr().read();
+
+        can.fmr.write(|w| unsafe { w.can2sb().bits(split_idx) });
+
+        (
+            FilterBank {
+                split_idx,
+                _can: PhantomData,
+            },
+            FilterBank {
+                split_idx,
+                _can: PhantomData,
+            },
+        )
     }
 }
 
 #[cfg(feature = "connectivity")]
-impl<PINS> Can<CAN2, PINS> {
-    pub fn can2(
-        can: CAN2,
-        clk: FilterClock,
-        pins: PINS,
+impl Can<CAN2> {
+    pub fn can2<PINS>(
+        _can: CAN2,
+        filters: FilterBank<CAN2>,
+        _pins: PINS,
         mapr: &mut MAPR,
         apb1: &mut APB1,
-    ) -> Can<CAN2, PINS>
+    ) -> Can<CAN2>
     where
         PINS: Pins<CAN2>,
     {
         // power up CAN peripheral
-        CAN1::enable(apb1);
         CAN2::enable(apb1);
 
         // delay after an RCC peripheral clock enabling
@@ -482,21 +470,21 @@ impl<PINS> Can<CAN2, PINS> {
         // choose pin mapping
         mapr.modify_mapr(|_, w| w.can2_remap().bit(PINS::REMAP == 1));
 
-        Can { can, pins, clk }
-    }
-
-    /// releasing the resources
-    /// (required for example to use USB instead of CAN)
-    pub fn release(self, apb1: &mut APB1) -> (CAN2, PINS, FilterClock) {
-        CAN2::disable(apb1);
-        (self.can, self.pins, self.clk)
+        Can {
+            can: PhantomData,
+            filter_bank: filters,
+        }
     }
 }
 
-impl<PINS, CAN> Can<CAN, PINS>
+impl<CAN> Can<CAN>
 where
     CAN: CanPeripheral,
 {
+    pub fn filters(&mut self) -> &mut FilterBank<CAN> {
+        &mut self.filter_bank
+    }
+
     /// moves from Sleep or Normal to Initialization mode
     fn to_initialization(&mut self) -> nb::Result<(), Infallible> {
         let can = unsafe { &*CAN::ptr() };
@@ -604,10 +592,86 @@ where
         }
     }
 
+    //TODO a join function may be needed also (which is the reverse of this one)...
+    pub fn split(self) -> (Tx<CAN>, Rx<CAN>) {
+        (Tx { _can: PhantomData }, Rx { _can: PhantomData })
+    }
+
+    /// interrupts for transmission:
+    /// CAN_IT_TME - Transmit mailbox empty Interrupt
+    ///
+    /// interrupts for reception:
+    /// CAN_IT_FMP0 - FIFO 0 message pending interrupt
+    /// CAN_IT_FF0  - FIFO 0 full interrupt
+    /// CAN_IT_FOV0 - FIFO 0 overrun interrupt
+    /// CAN_IT_FMP1 - FIFO 1 message pending interrupt
+    /// CAN_IT_FF1  - FIFO 1 full interrupt
+    /// CAN_IT_FOV1 - FIFO 1 overrun interrupt
+    ///
+    /// Operating Mode Interrupts:
+    /// CAN_IT_WKU - Wake-up interrupt
+    /// CAN_IT_SLK - Sleep acknowledge interrupt
+    ///
+    /// Error Interrupts:
+    /// CAN_IT_EWG - Error warning Interrupt
+    /// CAN_IT_EPV - Error passive Interrupt
+    /// CAN_IT_BOF - Bus-off Interrupt
+    /// CAN_IT_LEC - Last error code Interrupt
+    /// CAN_IT_ERR - Error Interrupt
+    pub fn listen() {
+        unimplemented!()
+    }
+
+    pub fn unlisten() {
+        unimplemented!()
+    }
+}
+
+// TODO: FIX DOCUMENATTION
+/// A zero-size-type that represents an enabled CAN1 clock for the filter banks.
+///
+/// Connectivity line devcies (stm32105/stm32f107) share the filter banks
+/// between the two CAN peripheral instances. The filter bank is clocked by
+/// CAN1 and this struct represents an enabled CAN1/filter clock.
+/// CAN2 takes ownership of the filter clock to make sure it is enabled.
+/// The filter clock token can be obtained by
+/// 1. `Can::can1()` which returns it in addition to its instance API struct
+/// 2. `FilterClock::enable()` when only the CAN1 clock is required to
+///     construct CAN2.
+// Cannot be constructed outside of this module.
+pub struct FilterBank<CAN> {
+    /// Number of available filter bank for this peripheral intsance.
+    split_idx: FilterBankIndex,
+    _can: PhantomData<CAN>,
+}
+
+// TODO: seal
+pub trait FilterBankIdxCheck {
+    fn index_valid(&self, index: FilterBankIndex) -> bool;
+}
+
+impl FilterBankIdxCheck for FilterBank<CAN1> {
+    fn index_valid(&self, index: FilterBankIndex) -> bool {
+        index < self.split_idx
+    }
+}
+
+#[cfg(feature = "connectivity")]
+impl FilterBankIdxCheck for FilterBank<CAN2> {
+    fn index_valid(&self, index: FilterBankIndex) -> bool {
+        index >= self.split_idx && index < FILTERBANKCOUNT
+    }
+}
+
+impl<CAN> FilterBank<CAN>
+where
+    CAN: CanPeripheral,
+    Self: FilterBankIdxCheck,
+{
     pub fn activate_filter_bank(&mut self, index: FilterBankIndex, activate: bool) {
         let can = unsafe { &*CAN::ptr() };
 
-        if index >= FILTERBANKCOUNT {
+        if !self.index_valid(index) {
             return; // Err(Error::InvalidArgument);
         }
 
@@ -627,7 +691,7 @@ where
     ) {
         let can = unsafe { &*CAN::ptr() };
 
-        if index >= FILTERBANKCOUNT {
+        if !self.index_valid(index) {
             return; // Err(Error::InvalidArgument);
         }
 
@@ -715,40 +779,6 @@ where
         let can = unsafe { &*CAN::ptr() };
         can.fb[index as usize].fr1.write(|w| unsafe { w.bits(r1) });
         can.fb[index as usize].fr1.write(|w| unsafe { w.bits(r2) });
-    }
-
-    //TODO a join function may be needed also (which is the reverse of this one)...
-    pub fn split(self) -> (Tx<CAN>, Rx<CAN>) {
-        (Tx { _can: PhantomData }, Rx { _can: PhantomData })
-    }
-
-    /// interrupts for transmission:
-    /// CAN_IT_TME - Transmit mailbox empty Interrupt
-    ///
-    /// interrupts for reception:
-    /// CAN_IT_FMP0 - FIFO 0 message pending interrupt
-    /// CAN_IT_FF0  - FIFO 0 full interrupt
-    /// CAN_IT_FOV0 - FIFO 0 overrun interrupt
-    /// CAN_IT_FMP1 - FIFO 1 message pending interrupt
-    /// CAN_IT_FF1  - FIFO 1 full interrupt
-    /// CAN_IT_FOV1 - FIFO 1 overrun interrupt
-    ///
-    /// Operating Mode Interrupts:
-    /// CAN_IT_WKU - Wake-up interrupt
-    /// CAN_IT_SLK - Sleep acknowledge interrupt
-    ///
-    /// Error Interrupts:
-    /// CAN_IT_EWG - Error warning Interrupt
-    /// CAN_IT_EPV - Error passive Interrupt
-    /// CAN_IT_BOF - Bus-off Interrupt
-    /// CAN_IT_LEC - Last error code Interrupt
-    /// CAN_IT_ERR - Error Interrupt
-    pub fn listen() {
-        unimplemented!()
-    }
-
-    pub fn unlisten() {
-        unimplemented!()
     }
 }
 

@@ -31,6 +31,11 @@ fn main() -> ! {
     let dp = stm32f1xx_hal::stm32::Peripherals::take().unwrap();
     let mut rcc = dp.RCC.constrain();
 
+    #[cfg(not(feature = "connectivity"))]
+    let filters = can::Can::filter_banks(dp.CAN1, &mut rcc.apb1);
+    #[cfg(feature = "connectivity")]
+    let (filters, _) = can::Can::filter_banks(dp.CAN1, &mut rcc.apb1, can::FILTERBANKCOUNT);
+
     let mut gpioa = dp.GPIOA.split(&mut rcc.apb2);
     let canrx = gpioa.pa11.into_floating_input(&mut gpioa.crh);
     let cantx = gpioa.pa12.into_alternate_push_pull(&mut gpioa.crh);
@@ -42,13 +47,10 @@ fn main() -> ! {
 
     let mut afio = dp.AFIO.constrain(&mut rcc.apb2);
     //USB is needed here because it can not be used at the same time as CAN since they share memory:
-    let mut can = can::Can::can1(
-        dp.CAN1,
-        (cantx, canrx),
-        &mut afio.mapr,
-        &mut rcc.apb1,
-        dp.USB,
-    );
+    #[cfg(not(feature = "connectivity"))]
+    let mut can = can::Can::can1(filters, (cantx, canrx), &mut afio.mapr, dp.USB);
+    #[cfg(feature = "connectivity")]
+    let mut can = can::Can::can1(filters, (cantx, canrx), &mut afio.mapr);
 
     can.configure(&config);
     nb::block!(can.to_normal()).unwrap(); //just to be sure
@@ -96,10 +98,10 @@ fn main() -> ! {
         fifo_assignment: 1,
         active: true,
     };
-    can.configure_filter_bank(0, &filterbank0_config);
-    can.configure_filter_bank(1, &filterbank1_config);
-    can.configure_filter_bank(2, &filterbank2_config);
-    can.configure_filter_bank(3, &filterbank3_config);
+    can.filters().configure_filter_bank(0, &filterbank0_config);
+    can.filters().configure_filter_bank(1, &filterbank1_config);
+    can.filters().configure_filter_bank(2, &filterbank2_config);
+    can.filters().configure_filter_bank(3, &filterbank3_config);
 
     let mut hstdout = hio::hstdout().unwrap();
 
