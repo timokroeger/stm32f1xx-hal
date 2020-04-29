@@ -37,8 +37,8 @@ use crate::rcc::{Enable, APB1};
 use core::{convert::Infallible, convert::TryInto, marker::PhantomData};
 
 mod sealed {
-    // TODO: use associate type
-    pub trait Pins<CAN> {
+    pub trait Pins {
+        type CAN: CanPeripheral;
         const REMAP: u8;
     }
 
@@ -326,21 +326,25 @@ impl CanPeripheral for CAN2 {
     }
 }
 
-impl Pins<CAN1> for (PA12<Alternate<PushPull>>, PA11<Input<Floating>>) {
+impl Pins for (PA12<Alternate<PushPull>>, PA11<Input<Floating>>) {
+    type CAN = CAN1;
     const REMAP: u8 = 0b00;
 }
 
-impl Pins<CAN1> for (PB9<Alternate<PushPull>>, PB8<Input<Floating>>) {
+impl Pins for (PB9<Alternate<PushPull>>, PB8<Input<Floating>>) {
+    type CAN = CAN1;
     const REMAP: u8 = 0b10;
 }
 
 #[cfg(feature = "connectivity")]
-impl Pins<CAN2> for (PB13<Alternate<PushPull>>, PB12<Input<Floating>>) {
+impl Pins for (PB13<Alternate<PushPull>>, PB12<Input<Floating>>) {
+    type CAN = CAN2;
     const REMAP: u8 = 0;
 }
 
 #[cfg(feature = "connectivity")]
-impl Pins<CAN2> for (PB6<Alternate<PushPull>>, PB5<Input<Floating>>) {
+impl Pins for (PB6<Alternate<PushPull>>, PB5<Input<Floating>>) {
+    type CAN = CAN2;
     const REMAP: u8 = 1;
 }
 
@@ -372,7 +376,7 @@ impl Can<CAN1> {
         usb: USB,
     ) -> Can<CAN1>
     where
-        PINS: Pins<CAN1>,
+        PINS: Pins<CAN = CAN1>,
     {
         // choose pin mapping
         #[allow(unused_unsafe)]
@@ -388,7 +392,7 @@ impl Can<CAN1> {
     #[cfg(feature = "connectivity")]
     pub fn can1<PINS>(filters: FilterBank<CAN1>, _pins: PINS, mapr: &mut MAPR) -> Can<CAN1>
     where
-        PINS: Pins<CAN1>,
+        PINS: Pins<CAN = CAN1>,
     {
         // choose pin mapping
         mapr.modify_mapr(|_, w| unsafe { w.can1_remap().bits(PINS::REMAP) });
@@ -459,7 +463,7 @@ impl Can<CAN2> {
         apb1: &mut APB1,
     ) -> Can<CAN2>
     where
-        PINS: Pins<CAN2>,
+        PINS: Pins<CAN = CAN2>,
     {
         // power up CAN peripheral
         CAN2::enable(apb1);
