@@ -1,25 +1,31 @@
-//! CAN interface
+//! # Controller Area Network (CAN) Interface
 //!
-//! The `Can` interface can be used with the following CAN instances:
 //!
-//! # CAN1
+//! ## Alternate function remapping
 //!
-//! - TX = PA12 | PB9
-//! - RX = PA11 | PB8
-//! - Interrupt = CAN1
+//! TX: Alternate Push-Pull Output
+//! RX: Input Floating Input
 //!
-//! # CAN2
+//! ### CAN1
 //!
-//! - TX = PB6 | PB13
-//! - RX = PB5 | PB12
-//! - Interrupt = CAN2
+//! | Function | NoRemap | Remap |
+//! |----------|---------|-------|
+//! | TX       | PA12    | PB9   |
+//! | RX       | PA11    | PB8   |
+//!
+//! ### CAN2
+//!
+//! | Function | NoRemap | Remap |
+//! |----------|---------|-------|
+//! | TX       | PB6     | PB13  |
+//! | RX       | PB5     | PB12  |
 
 use crate::afio::MAPR;
 #[cfg(feature = "connectivity")]
 use crate::device::CAN2;
 #[cfg(not(feature = "connectivity"))]
 use crate::device::USB;
-use crate::device::{can1, CAN1};
+use crate::device::{can1::RegisterBlock, CAN1};
 #[cfg(feature = "connectivity")]
 use crate::gpio::gpiob::{PB12, PB13, PB5, PB6};
 use crate::gpio::{
@@ -30,31 +36,56 @@ use crate::gpio::{
 use crate::rcc::{Enable, APB1};
 use core::{convert::Infallible, convert::TryInto, marker::PhantomData};
 
+mod sealed {
+    // TODO: use associate type
+    pub trait Pins<CAN> {
+        const REMAP: u8;
+    }
+
+    pub trait CanPeripheral {
+        fn ptr() -> *const super::RegisterBlock;
+    }
+}
+use sealed::{CanPeripheral, Pins};
+
+/// Identifier of a CAN message.
+///
+/// Can be either a standard identifier (11bit, Range: 0..0x3FF)
+/// or a extendended identifier (29bit , Range: 0..0x1FFFFFFF).
+// TODO: Add a `Copy` derive.
+// TODO: Check `Ord` because comparing standard and extended frames is tricky.
 #[derive(Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Id {
-    // standard part: 0x_FFE0_0000 //11 valid bits
-    // extended part: 0x_FFFF_FFF8 //11+18 vaild bits
-    // is_extended:   0x_0000_0004
-    // is_rtr:        0x_0000_0002
+    // standard part: 0xFFE0_0000 //11 valid bits
+    // extended part: 0xFFFF_FFF8 //11+18 vaild bits
+    // is_extended:   0x0000_0004
+    // is_rtr:        0x0000_0002
     raw: u32,
 }
 
-//TODO put a part of this in the HAL as Id trait?
 impl Id {
+    /// Creates a new standard identifier (11bit, Range: 0..0x3FF)
+    ///
+    /// Ids outside the allowed range are silently truncated.
     pub fn new_standard(standard: u32) -> Id {
         // this could become a const function, when it becomes stable in Rust
         Id {
-            raw: (standard & 0b_111_1111_1111) << 21,
+            raw: (standard & 0b111_1111_1111) << 21,
         }
     }
 
+    /// Creates a new extendended identifier (29bit , Range: 0..0x1FFFFFFF).
+    ///
+    /// Ids outside the allowed range are silently truncated.
     pub fn new_extended(extended: u32) -> Id {
         // this could become a const function, when it becomes stable in Rust
         Id {
-            raw: 0b100 | ((extended & 0b_1_1111_1111_1111_1111_1111_1111_1111) << 3),
+            raw: 0b100 | ((extended & 0b1_1111_1111_1111_1111_1111_1111_1111) << 3),
         }
     }
 
+    /// Sets the remotre transmission (RTR) flag. This marks the ID as being
+    /// part of a remote frame.
     pub fn with_rtr(&self) -> Id {
         Id {
             raw: self.raw | 0b10,
@@ -65,22 +96,27 @@ impl Id {
         Id { raw: register }
     }
 
+    /// Returns `true` if the identifier is an extended identifier.
     pub fn is_extended(&self) -> bool {
         0 != (self.raw & 0b100)
     }
 
+    /// Returns `true` if the identifier is an standard identifier.
     pub fn standard(&self) -> u16 {
-        ((self.raw & 0b_1_111_1111_1110_0000_0000_0000_0000_0000) >> 21) as u16
+        ((self.raw & 0b1_111_1111_1110_0000_0000_0000_0000_0000) >> 21) as u16
     }
 
+    /// Returns `true` if the identifier is an extended identifier.
     pub fn extended(&self) -> u32 {
-        (self.raw & 0b_1111_1111_1111_1111_1111_1111_1111_1000) >> 3
+        (self.raw & 0b1111_1111_1111_1111_1111_1111_1111_1000) >> 3
     }
 
+    // TODO: Does it need to be public?
     pub fn extended_part(&self) -> u32 {
-        (self.raw & 0b_0_0000_0000_0011_1111_1111_1111_1111_1000) >> 3
+        (self.raw & 0b0000_0000_0011_1111_1111_1111_1111_1000) >> 3
     }
 
+    /// Returns `true` if the identifer is part of a remote frame.
     pub fn is_rtr(&self) -> bool {
         0 != (self.raw & 0b10)
     }
@@ -93,12 +129,13 @@ impl Id {
 
     fn as_16bit_filter(&self) -> u32 {
         // [31:0] = stdid[10:0], IDE, RTR, extid[17:15]
-        ((self.raw & 0b_1111_1111_1110_0000_0000_0000_0000_0000) >> 16)
+        ((self.raw & 0b1111_1111_1110_0000_0000_0000_0000_0000) >> 16)
             | ((self.raw & 0b1100) << 1)
-            | ((self.raw & 0b_1_1100_0000_0000_0000_0000) >> 18)
+            | ((self.raw & 0b1_1100_0000_0000_0000_0000) >> 18)
     }
 }
 
+/// A CAN data or remote frame.
 pub struct Frame {
     id: Id,
     dlc: usize,
@@ -106,6 +143,7 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// Creates a new frame.
     pub fn new(id: Id, data: &[u8]) -> Self {
         let mut frame = Self {
             id,
@@ -115,14 +153,19 @@ impl Frame {
         frame.data[0..data.len()].copy_from_slice(data);
         frame
     }
+
+    /// Gets the frame identifier.
     pub fn id(&self) -> &Id {
         &self.id
     }
+
+    // Gets the frame data.
     pub fn data(&self) -> &[u8] {
         &self.data[0..self.dlc]
     }
 }
 
+// TODO: Fix markup for register names. Does this come from the STM32-HAL?
 pub struct Configuration {
     /// In this mode, the internal counter of the CAN hardware is
     /// activated and used to generate the Time Stamp value stored
@@ -131,8 +174,8 @@ pub struct Configuration {
     /// sample point of the Start Of Frame bit in both reception and
     /// transmission.
     /// In this mode, if DLC == 8, the last two data bytes of the
-    /// 8-byte message is replaced with a 16 bit timestamp: TIME[7:0]
-    /// in data byte 6 and TIME[15:8] in data byte 7
+    /// 8-byte message is replaced with a 16 bit timestamp: `TIME[7:0]`
+    /// in data byte 6 and `TIME[15:8]` in data byte 7
     pub time_triggered_communication_mode: bool,
 
     /// Depending on the ABOM bit in the CAN_MCR register bxCAN will
@@ -215,10 +258,11 @@ pub struct Configuration {
     pub bit_segment_2: u8,
 
     /// Prescaling for time quantum: 1..1024
-    /// Length of a time quanta: tq = (BRP[9:0]+1) x tPCLK
+    /// Length of a time quanta: `tq = (BRP[9:0]+1) x tPCLK`
     pub time_quantum_length: u16,
 }
 
+/// Number of supported filter banks.
 #[cfg(not(feature = "connectivity"))]
 pub const FILTERBANKCOUNT: FilterBankIndex = 14;
 #[cfg(feature = "connectivity")]
@@ -240,21 +284,19 @@ pub struct FilterData {
 }
 
 pub enum FilterInfo {
-    /// One 32-bit filter for the STDID[10:0], EXTID[17:0], IDE and RTR bits.
+    /// One 32-bit filter for 29bits of the identifier, IDE and RTR bits.
     Whole(FilterData),
-    /// Two 16-bit filters for the STDID[10:0], RTR, IDE and EXTID[17:15] bits (the rest of extid bits are ignored).
+
+    /// Two 16-bit filters for the upmost 14bits of the identifier, RTR, IDE bits.
     Halves((FilterData, FilterData)),
 }
 
 pub struct FilterBankConfiguration {
-    /// Specifies the filter mode to be InitializationMode.
-    ///  This parameter can be a value of @ref CAN_filter_mode
     pub mode: FilterMode,
 
     pub info: FilterInfo,
 
     /// Specifies the FIFO (0 or 1) which will be assigned to the filter.
-    /// This parameter can be a value of @ref CAN_filter_FIFO
     pub fifo_assignment: RxFifoIndex,
 
     /// Enable or disable the filter.
@@ -269,26 +311,19 @@ pub enum Error {
     NotEmptyTxMailBox,
 }
 
-pub trait CanPeripheral {
-    fn ptr() -> *const can1::RegisterBlock;
-}
-
 impl CanPeripheral for CAN1 {
-    fn ptr() -> *const can1::RegisterBlock {
+    fn ptr() -> *const RegisterBlock {
         CAN1::ptr()
     }
 }
 
 #[cfg(feature = "connectivity")]
 impl CanPeripheral for CAN2 {
-    fn ptr() -> *const can1::RegisterBlock {
-        // Register block definitions are the same.
-        CAN2::ptr() as *const can1::RegisterBlock
+    fn ptr() -> *const RegisterBlock {
+        // Register blocks are the same except for filters related registers
+        // which are only available on CAN1.
+        CAN2::ptr() as *const RegisterBlock
     }
-}
-
-pub trait Pins<CAN> {
-    const REMAP: u8;
 }
 
 impl Pins<CAN1> for (PA12<Alternate<PushPull>>, PA11<Input<Floating>>) {
@@ -309,6 +344,8 @@ impl Pins<CAN2> for (PB6<Alternate<PushPull>>, PB5<Input<Floating>>) {
     const REMAP: u8 = 1;
 }
 
+/// A zero-size-type that represents an enabled CAN1 clock for the filter banks.
+///
 /// Connectivity line devcies (stm32105/stm32f107) share the filter banks
 /// between the two CAN peripheral instances. The filter bank is clocked by
 /// CAN1 and this struct represents an enabled CAN1/filter clock.
@@ -321,6 +358,7 @@ impl Pins<CAN2> for (PB6<Alternate<PushPull>>, PB5<Input<Floating>>) {
 pub struct FilterClock(());
 
 impl FilterClock {
+    /// Enable CAN1 clock to clock the filter bank for CAN2.
     pub fn enable(_can: CAN1, apb1: &mut APB1) -> FilterClock {
         FilterClock::enable_priv(apb1)
     }
@@ -340,7 +378,6 @@ impl FilterClock {
     }
 }
 
-/// CAN abstraction
 pub struct Can<CAN, PINS>
 where
     CAN: CanPeripheral,
