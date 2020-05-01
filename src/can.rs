@@ -778,7 +778,7 @@ where
     fn fill_filter_registers(&self, index: FilterBankIndex, r1: u32, r2: u32) {
         let can = unsafe { &*CAN::ptr() };
         can.fb[index as usize].fr1.write(|w| unsafe { w.bits(r1) });
-        can.fb[index as usize].fr1.write(|w| unsafe { w.bits(r2) });
+        can.fb[index as usize].fr2.write(|w| unsafe { w.bits(r2) });
     }
 }
 
