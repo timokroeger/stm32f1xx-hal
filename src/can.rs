@@ -19,6 +19,8 @@
 //! | TX       | PB6     | PB13  |
 //! | RX       | PB5     | PB12  |
 
+pub use crate::hal::can::Id;
+
 use crate::afio::MAPR;
 use crate::bb;
 #[cfg(feature = "connectivity")]
@@ -39,27 +41,6 @@ use core::{
     convert::{Infallible, TryInto},
     marker::PhantomData,
 };
-
-/// CAN Identifier
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum Id {
-    /// Standard 11bit Identifier (0..=0x7FF)
-    Standard(u32),
-
-    /// Extended 29bit Identifier (0..=0x1FFF_FFFF)
-    Extended(u32),
-}
-
-impl Id {
-    /// Returs true when the identifier is valid, false otherwise.
-    pub fn valid(self) -> bool {
-        match self {
-            Id::Standard(id) if id <= 0x7FF => true,
-            Id::Extended(id) if id <= 0x1FFF_FFFF => true,
-            _ => false,
-        }
-    }
-}
 
 /// Identifier of a CAN message.
 ///
@@ -87,7 +68,7 @@ impl IdReg {
 
     /// Creates a new standard identifier (11bit, Range: 0..0x7FF)
     ///
-    /// Panics for IDs outside the allowed range.
+    /// IDs outside the allowed range are silently truncated.
     pub fn new_standard(id: u32) -> Self {
         assert!(id < 0x7FF);
         Self(id << Self::STANDARD_SHIFT)
@@ -165,9 +146,9 @@ pub struct Frame {
     data: [u8; 8],
 }
 
-impl Frame {
+impl crate::hal::can::Frame for Frame {
     /// Creates a new frame.
-    pub fn new(id: Id, data: &[u8]) -> Result<Frame, ()> {
+    fn new(id: Id, data: &[u8]) -> Result<Frame, ()> {
         if !id.valid() || data.len() > 8 {
             return Err(());
         }
@@ -187,39 +168,39 @@ impl Frame {
     }
 
     /// Creates a new remote frame with configurable data length code (DLC).
-    pub fn new_remote(id: Id, dlc: usize) -> Result<Frame, ()> {
+    fn new_remote(id: Id, dlc: usize) -> Result<Frame, ()> {
         if dlc >= 8 {
             return Err(());
         }
 
-        let mut frame = Self::new(id, &[])?;
+        let mut frame = <Self as crate::hal::can::Frame>::new(id, &[])?;
         frame.dlc = dlc;
         frame.id.with_rtr(true);
         Ok(frame)
     }
 
     /// Returns true if this frame is an extended frame
-    pub fn is_extended(&self) -> bool {
+    fn is_extended(&self) -> bool {
         self.id.is_extended()
     }
 
     /// Returns true if this frame is a standard frame
-    pub fn is_standard(&self) -> bool {
+    fn is_standard(&self) -> bool {
         self.id.is_standard()
     }
 
     /// Returns true if this frame is a remote frame
-    pub fn is_remote_frame(&self) -> bool {
+    fn is_remote_frame(&self) -> bool {
         self.id.rtr()
     }
 
     /// Returns true if this frame is a data frame
-    pub fn is_data_frame(&self) -> bool {
+    fn is_data_frame(&self) -> bool {
         !self.is_remote_frame()
     }
 
     /// Returns the frame identifier.
-    pub fn id(&self) -> Id {
+    fn id(&self) -> Id {
         self.id.to_id()
     }
 
@@ -227,12 +208,12 @@ impl Frame {
     ///
     /// For data frames the DLC value always matches the length of the data.
     /// Remote frames no not carry any data, yet the DLC can be greater than 0.
-    pub fn dlc(&self) -> usize {
+    fn dlc(&self) -> usize {
         self.dlc
     }
 
     /// Returns the frame data (0..8 bytes in length).
-    pub fn data(&self) -> &[u8] {
+    fn data(&self) -> &[u8] {
         if self.is_data_frame() {
             &self.data[0..self.dlc]
         } else {
@@ -257,7 +238,7 @@ impl PartialOrd for Frame {
 // The Equality traits compare the identifier and the data.
 impl PartialEq for Frame {
     fn eq(&self, other: &Self) -> bool {
-        self.id() == other.id() && self.data[0..self.dlc] == other.data[0..other.dlc]
+        self.id == other.id && self.data[0..self.dlc] == other.data[0..other.dlc]
     }
 }
 
@@ -371,8 +352,8 @@ where
 /// Interface to the CAN peripheral.
 pub struct Can<Instance> {
     _can: PhantomData<Instance>,
-    tx: Option<Tx<Instance>>,
-    rx: Option<Rx<Instance>>,
+    tx_taken: bool,
+    rx_taken: bool,
 }
 
 impl<Instance> Can<Instance>
@@ -399,8 +380,8 @@ where
 
         Can {
             _can: PhantomData,
-            tx: Some(Tx { _can: PhantomData }),
-            rx: Some(Rx { _can: PhantomData }),
+            tx_taken: false,
+            rx_taken: false,
         }
     }
 
@@ -484,12 +465,34 @@ where
         can.msr.write(|w| w.wkui().set_bit());
     }
 
+    /// Returns a embedded-hal compatilbe interface.
+    ///
+    /// Takes ownership of filters which must be otained by `Can::split_filters()`.
+    /// Only the first calls returns a valid receiver. Subsequent calls return `None`.
+    pub fn as_hal(&mut self, _filters: Filters<Instance>) -> Option<CanHal<Instance>> {
+        if self.tx_taken || self.rx_taken {
+            None
+        } else {
+            self.tx_taken = true;
+            self.rx_taken = true;
+            Some(CanHal {
+                tx: Tx { _can: PhantomData },
+                rx: Rx { _can: PhantomData },
+            })
+        }
+    }
+
     /// Returns the transmitter interface.
     ///
     /// Only the first calls returns a valid transmitter. Subsequent calls
     /// return `None`.
     pub fn take_tx(&mut self) -> Option<Tx<Instance>> {
-        self.tx.take()
+        if self.tx_taken {
+            None
+        } else {
+            self.tx_taken = true;
+            Some(Tx { _can: PhantomData })
+        }
     }
 
     /// Returns the receiver interface.
@@ -497,7 +500,12 @@ where
     /// Takes ownership of filters which must be otained by `Can::split_filters()`.
     /// Only the first calls returns a valid receiver. Subsequent calls return `None`.
     pub fn take_rx(&mut self, _filters: Filters<Instance>) -> Option<Rx<Instance>> {
-        self.rx.take()
+        if self.rx_taken {
+            None
+        } else {
+            self.rx_taken = true;
+            Some(Rx { _can: PhantomData })
+        }
     }
 }
 
@@ -1056,5 +1064,26 @@ where
             bb::clear(&can.ier, 1); // FMPIE0
             bb::clear(&can.ier, 4); // FMPIE1
         }
+    }
+}
+
+pub struct CanHal<Instance> {
+    tx: Tx<Instance>,
+    rx: Rx<Instance>,
+}
+
+impl<Instance> crate::hal::can::Can for CanHal<Instance>
+where
+    Instance: traits::Instance,
+{
+    type Frame = Frame;
+    type Error = ();
+
+    fn transmit(&mut self, frame: &Frame) -> nb::Result<Option<Frame>, ()> {
+        self.tx.transmit(frame).map_err(|_| nb::Error::Other(()))
+    }
+
+    fn receive(&mut self) -> nb::Result<Frame, ()> {
+        self.rx.receive()
     }
 }

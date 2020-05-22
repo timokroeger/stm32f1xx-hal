@@ -31,7 +31,9 @@ default-features = false
 version = "0.2.2"
 
 [dependencies.embedded-hal]
-version = "0.2.3"
+git = "https://github.com/timokroeger/embedded-hal"
+branch = "can-v0.2.x"
+version = "0.2.4"
 features = ["unproven"]
 
 [dependencies.stm32-usbd]
