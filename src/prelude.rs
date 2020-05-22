@@ -9,6 +9,8 @@ pub use crate::flash::FlashExt as _stm32_hal_flash_FlashExt;
 pub use crate::gpio::GpioExt as _stm32_hal_gpio_GpioExt;
 pub use crate::hal::adc::OneShot as _embedded_hal_adc_OneShot;
 pub use crate::hal::can::Can as _embedded_hal_can_Can;
+pub use crate::hal::can::Filter as _embedded_hal_can_Filter;
+pub use crate::hal::can::FilterGroup as _embedded_hal_can_FilterGroup;
 pub use crate::hal::can::Frame as _embedded_hal_can_Frame;
 pub use crate::hal::digital::v2::StatefulOutputPin as _embedded_hal_digital_StatefulOutputPin;
 pub use crate::hal::digital::v2::ToggleableOutputPin as _embedded_hal_digital_ToggleableOutputPin;

@@ -49,15 +49,19 @@ fn main() -> ! {
         .unwrap();
     #[cfg(feature = "connectivity")]
     let (mut filters, _) = can
-        .split_filters_advanced(0x0000_0006, 0xFFFF_FFFA, 0x0000_0007, 3)
+        .split_filters_advanced(0x0000_0006, 0xFFFF_FFFA, 0x0000_0007, 14)
         .unwrap();
 
-    assert_eq!(filters.num_available(), 8);
+    let mut filter_groups = filters.groups();
 
     // The order of the added filters is important: it must match configuration
     // of the `split_filters_advanced()` method.
 
     // 2x 11bit id + mask filter bank: Matches 0, 1, 2
+    let filter_group = filter_groups.next().unwrap();
+    assert_eq!(filter_group.num_filters(), 2);
+    assert!(!filter_group.extended());
+    assert!(filter_group.mask().is_some());
     filters
         .add(&Filter::new(Id::Standard(0)).with_mask(!0b1))
         .unwrap();
@@ -66,14 +70,29 @@ fn main() -> ! {
         .unwrap();
 
     // 2x 29bit id filter bank: Matches 4, 5
+    let filter_group = filter_groups.next().unwrap();
+    assert_eq!(filter_group.num_filters(), 2);
+    assert!(filter_group.extended());
+    assert!(filter_group.mask().is_none());
     filters.add(&Filter::new(Id::Standard(4))).unwrap();
     filters.add(&Filter::new(Id::Standard(5))).unwrap();
 
     // 4x 11bit id filter bank: Matches 8, 9, 10, 11
+    let filter_group = filter_groups.next().unwrap();
+    assert_eq!(filter_group.num_filters(), 4);
+    assert!(!filter_group.extended());
+    assert!(filter_group.mask().is_none());
     filters.add(&Filter::new(Id::Standard(8))).unwrap();
     filters.add(&Filter::new(Id::Standard(9))).unwrap();
     filters.add(&Filter::new(Id::Standard(10))).unwrap();
     filters.add(&Filter::new(Id::Standard(11))).unwrap();
+
+    // 29bit id + mask for the remaining 11 filter banks
+    let filter_group = filter_groups.next().unwrap();
+    assert_eq!(filter_group.num_filters(), 11);
+    assert!(filter_group.extended());
+    assert!(filter_group.mask().is_some());
+    assert!(filter_groups.next().is_none());
 
     // Split the peripheral into transmitter and receiver parts.
     let mut rx = can.take_rx(filters).unwrap();

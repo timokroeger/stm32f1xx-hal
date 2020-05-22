@@ -48,7 +48,10 @@ fn main() -> ! {
     // Split the filters at index 0: No filters for CAN1 (unused), 28 filters
     // for CAN2.
     let (_filters1, mut filters2) = can1.split_filters(0).unwrap();
-    assert_eq!(filters2.num_available(), NUM_FILTER_BANKS);
+    assert_eq!(
+        filters2.groups().into_iter().next().unwrap().num_filters(),
+        NUM_FILTER_BANKS
+    );
     filters2.add(&Filter::accept_all()).unwrap(); // Receive all messages.
 
     // Split the peripheral into transmitter and receiver parts.
