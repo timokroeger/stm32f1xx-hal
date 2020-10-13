@@ -1120,3 +1120,5 @@ where
         self.rx.receive()
     }
 }
+
+impl<Instance: traits::Instance> embedded_can::blocking::Default for CanHal<Instance> {}

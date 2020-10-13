@@ -7,6 +7,7 @@
 use panic_halt as _;
 
 use cortex_m_rt::entry;
+use embedded_can::Can as _;
 use embedded_hal::digital::v2::OutputPin;
 use nb::block;
 use stm32f1xx_hal::{
@@ -75,9 +76,10 @@ fn main() -> ! {
     filters.add(&Filter::new(Id::Standard(10))).unwrap();
     filters.add(&Filter::new(Id::Standard(11))).unwrap();
 
-    // Split the peripheral into transmitter and receiver parts.
-    let mut rx = can.take_rx(filters).unwrap();
-    let mut tx = can.take_tx().unwrap();
+    // Get an embedded-hal comptible interface to the peripheral.
+    // Depending on the imported traits this can be blocking or not.
+    // This example uses the non-blocking variant.
+    let mut can_hal = can.take_hal(filters).unwrap();
 
     // Sync to the bus and start normal operation.
     block!(can.enable()).ok();
@@ -85,16 +87,16 @@ fn main() -> ! {
     // Some messages shall pass the filters.
     for &id in &[0, 1, 2, 4, 5, 8, 9, 10, 11] {
         let frame_tx = Frame::new(Id::Standard(id), &[id as u8]).unwrap();
-        block!(tx.transmit(&frame_tx)).unwrap();
-        let frame_rx = block!(rx.receive()).unwrap();
+        block!(can_hal.try_transmit(&frame_tx)).unwrap();
+        let frame_rx = block!(can_hal.try_receive()).unwrap();
         assert_eq!(frame_tx, frame_rx);
     }
 
     // Others must be filtered out.
     for &id in &[3, 6, 7, 12] {
         let frame_tx = Frame::new(Id::Standard(id), &[id as u8]).unwrap();
-        block!(tx.transmit(&frame_tx)).unwrap();
-        assert!(rx.receive().is_err());
+        block!(can_hal.try_transmit(&frame_tx)).unwrap();
+        assert!(can_hal.try_receive().is_err());
     }
 
     let mut gpiob = dp.GPIOB.split(&mut rcc.apb2);

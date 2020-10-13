@@ -6,7 +6,7 @@
 use panic_halt as _;
 
 use cortex_m_rt::entry;
-use nb::block;
+use embedded_can::blocking::Can as _;
 use stm32f1xx_hal::{
     can::{Can, Filter, NUM_FILTER_BANKS},
     pac,
@@ -51,19 +51,20 @@ fn main() -> ! {
     assert_eq!(filters2.num_available(), NUM_FILTER_BANKS);
     filters2.add(&Filter::accept_all()).unwrap(); // Receive all messages.
 
-    // Split the peripheral into transmitter and receiver parts.
-    let mut rx = can2.take_rx(filters2).unwrap();
-    let mut tx = can2.take_tx().unwrap();
+    // Get an embedded-hal comptible interface to the peripheral.
+    // Depending on the imported traits this can be blocking or not.
+    // This example uses the blocking variant.
+    let mut can_hal = can2.take_hal(filters2).unwrap();
 
     // Sync to the bus and start normal operation.
-    block!(can2.enable()).ok();
+    let _ = can2.enable();
 
     // Echo back received packages in sequence.
     // See the `can-rtfm` example for an echo implementation that adheres to
     // correct frame ordering based on the transfer id.
     loop {
-        if let Ok(frame) = block!(rx.receive()) {
-            block!(tx.transmit(&frame)).unwrap();
+        if let Ok(frame) = can_hal.try_read() {
+            can_hal.try_write(&frame).unwrap();
         }
     }
 }
