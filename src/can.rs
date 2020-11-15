@@ -19,7 +19,7 @@
 //! | TX       | PB6     | PB13  |
 //! | RX       | PB5     | PB12  |
 
-pub use embedded_can::Id;
+pub use embedded_can::{ExtendedId, Id, StandardId};
 
 use crate::afio::MAPR;
 use crate::bb;
@@ -99,9 +99,9 @@ impl IdReg {
     /// Returns the identifier.
     fn to_id(self) -> Id {
         if self.is_extended() {
-            Id::Extended(self.0 >> Self::EXTENDED_SHIFT)
+            Id::new_extended(self.0 >> Self::EXTENDED_SHIFT).unwrap()
         } else {
-            Id::Standard(self.0 >> Self::STANDARD_SHIFT)
+            Id::new_standard((self.0 >> Self::STANDARD_SHIFT) as u16).unwrap()
         }
     }
 
@@ -149,13 +149,13 @@ pub struct Frame {
 impl Frame {
     /// Creates a new frame.
     pub fn new(id: Id, data: &[u8]) -> Result<Frame, ()> {
-        if !id.valid() || data.len() > 8 {
+        if data.len() > 8 {
             return Err(());
         }
 
         let id = match id {
-            Id::Standard(id) => IdReg::new_standard(id),
-            Id::Extended(id) => IdReg::new_extended(id),
+            Id::Standard(id) => IdReg::new_standard(id.into()),
+            Id::Extended(id) => IdReg::new_extended(id.into()),
         };
 
         let mut frame = Self {
@@ -629,11 +629,11 @@ impl Filter {
     pub fn new(id: Id) -> Self {
         match id {
             Id::Standard(id) => Filter {
-                id: id << IdReg::STANDARD_SHIFT,
+                id: u32::from(id) << IdReg::STANDARD_SHIFT,
                 mask: IdReg::STANDARD_MASK | IdReg::IDE_MASK | IdReg::RTR_MASK,
             },
             Id::Extended(id) => Filter {
-                id: id << IdReg::EXTENDED_SHIFT | IdReg::IDE_MASK,
+                id: u32::from(id) << IdReg::EXTENDED_SHIFT | IdReg::IDE_MASK,
                 mask: IdReg::EXTENDED_MASK | IdReg::IDE_MASK | IdReg::RTR_MASK,
             },
         }

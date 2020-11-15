@@ -60,21 +60,33 @@ fn main() -> ! {
 
     // 2x 11bit id + mask filter bank: Matches 0, 1, 2
     filters
-        .add(&Filter::new(Id::Standard(0)).with_mask(!0b1))
+        .add(&Filter::new(Id::new_standard(0).unwrap()).with_mask(!0b1))
         .unwrap();
     filters
-        .add(&Filter::new(Id::Standard(0)).with_mask(!0b10))
+        .add(&Filter::new(Id::new_standard(0).unwrap()).with_mask(!0b10))
         .unwrap();
 
     // 2x 29bit id filter bank: Matches 4, 5
-    filters.add(&Filter::new(Id::Standard(4))).unwrap();
-    filters.add(&Filter::new(Id::Standard(5))).unwrap();
+    filters
+        .add(&Filter::new(Id::new_standard(4).unwrap()))
+        .unwrap();
+    filters
+        .add(&Filter::new(Id::new_standard(5).unwrap()))
+        .unwrap();
 
     // 4x 11bit id filter bank: Matches 8, 9, 10, 11
-    filters.add(&Filter::new(Id::Standard(8))).unwrap();
-    filters.add(&Filter::new(Id::Standard(9))).unwrap();
-    filters.add(&Filter::new(Id::Standard(10))).unwrap();
-    filters.add(&Filter::new(Id::Standard(11))).unwrap();
+    filters
+        .add(&Filter::new(Id::new_standard(8).unwrap()))
+        .unwrap();
+    filters
+        .add(&Filter::new(Id::new_standard(9).unwrap()))
+        .unwrap();
+    filters
+        .add(&Filter::new(Id::new_standard(10).unwrap()))
+        .unwrap();
+    filters
+        .add(&Filter::new(Id::new_standard(11).unwrap()))
+        .unwrap();
 
     // Get an embedded-hal comptible interface to the peripheral.
     // Depending on the imported traits this can be blocking or not.
@@ -86,7 +98,7 @@ fn main() -> ! {
 
     // Some messages shall pass the filters.
     for &id in &[0, 1, 2, 4, 5, 8, 9, 10, 11] {
-        let frame_tx = Frame::new(Id::Standard(id), &[id as u8]).unwrap();
+        let frame_tx = Frame::new(Id::new_standard(id).unwrap(), &[id as u8]).unwrap();
         block!(can_hal.try_transmit(&frame_tx)).unwrap();
         let frame_rx = block!(can_hal.try_receive()).unwrap();
         assert_eq!(frame_tx, frame_rx);
@@ -94,7 +106,7 @@ fn main() -> ! {
 
     // Others must be filtered out.
     for &id in &[3, 6, 7, 12] {
-        let frame_tx = Frame::new(Id::Standard(id), &[id as u8]).unwrap();
+        let frame_tx = Frame::new(Id::new_standard(id).unwrap(), &[id as u8]).unwrap();
         block!(can_hal.try_transmit(&frame_tx)).unwrap();
         assert!(can_hal.try_receive().is_err());
     }
